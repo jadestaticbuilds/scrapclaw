@@ -110,9 +110,10 @@
 <script>
 "use strict";
 /* ============================================================
-   SCRAPCLAW, Stage 1. A junkyard claw simulator.
-   One car, one claw, one flattener. Tear it apart, feed the
-   bin, crush the husk, bring in the next one.
+   SCRAPCLAW, Stage 2. A junkyard claw simulator.
+   Sedans, pickups, vans, hatchbacks and motorcycles roll in.
+   Tear them apart, feed the bin, crush the husk, bring in
+   the next one.
    ============================================================ */
 const { Engine, Bodies, Body, Composite, Constraint, Vector } = Matter;
 
@@ -122,7 +123,6 @@ const L1 = 368, L2 = 352;                       // boom and stick lengths
 const BIN = { x: 706, y: 592, w: 224, h: 76 };  // scrap bin zone
 const PAD = { x0: 962, x1: 1150, cx: 1056 };    // flattener pad zone
 const CAR_X = 560;                              // work spot
-const SHELL_KG = 650;
 const REDUCED = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const SHAKE_SCALE = REDUCED ? 0.5 : 1;
 
@@ -240,7 +240,6 @@ Composite.add(world, [ground, wallL, wallR]);
 let parts = [];
 let shellPart = null;
 let carLive = false, carArriving = false, arriveDX = 0;
-let carSeq = 0;
 let strippedKg = 0, totalStrippable = 1;
 let grip = null;
 let rigLocked = false, rigAnim = 1, rigTarget = 1; // dismantling rig: anim 0 = arms engaged, 1 = swung away
@@ -253,7 +252,6 @@ let flattenAnim = null;
 let pressPlateY = 262;
 let particles = [], floaters = [];
 let keys = {};
-const CAR_COLORS = ["#2f6db3", "#b3392f", "#3f8f4f", "#d97b29", "#7a4fa3", "#2f8f8a", "#c2a13a"];
 
 /* ---------- particles and floaters ---------- */
 function addShake(n) { shake = Math.min(shake + n * SHAKE_SCALE, 26); }
@@ -496,7 +494,7 @@ function strainCheck() {
   }
   for (const p of parts) {
     if (!p.attached || p.isShell || !p.body) continue;
-    const thr = p.name === "engine" ? (hoodAttached() ? 150 : 85) : p.threshold;
+    const thr = p.engineThr ? (hoodAttached() ? p.engineThr[0] : p.engineThr[1]) : p.threshold;
     const boost = (grip && grip.part === p) ? yank : 0;
     for (const j of p.joints) {
       // constraint points are solver-maintained world offsets:
@@ -596,7 +594,8 @@ function makePart(name, body, opts, home) {
   const p = Object.assign({
     name, body, kg: 0, attached: true, joints: [], threshold: 55,
     glass: false, hp: 0, cracked: false, gripR: 40, gripK: 0.85,
-    isShell: false, isSlab: false, gone: false, drawZ: 5, w: 0, h: 0, r: 0, color: "#888"
+    isShell: false, isSlab: false, gone: false, drawZ: 5, w: 0, h: 0, r: 0, color: "#888",
+    kind: null, vtype: null, engineThr: null
   }, opts || {});
   p.home = home || { x: body.position.x, y: body.position.y };
   parts.push(p);
@@ -616,65 +615,380 @@ function sloped(x1, y1, x2, y2, thick, opts) {
   const len = Math.hypot(x2 - x1, y2 - y1);
   return Bodies.rectangle((x1 + x2) / 2, (y1 + y2) / 2, len, thick, Object.assign({ angle: Math.atan2(y2 - y1, x2 - x1) }, opts));
 }
-function spawnCar(driveIn) {
+/* ---------- vehicle specs ---------- */
+/* Coordinates: dx is relative to the work-spot center CAR_X, dy is
+   relative to GROUND_Y (negative is up). Rect and circle parts use
+   dx, dy as their center; slope parts use dx1, dy1, dx2, dy2 as
+   endpoints and thick as the bar thickness. Joints are weld points
+   in the same relative frame, each [dx, dy] or [dx, dy, stiffness],
+   and every joint welds the part to the shell. For slope parts w is
+   the bar length and h the thickness, which is what the painter
+   expects. engineThr is [covered, bare]: the strain threshold for
+   the engine with the hood on and with it off. */
+const VEHICLES = {
+  sedan: {
+    id: "sedan", label: "SEDAN", crushKg: 650,
+    colors: ["#2f6db3", "#8c2f39", "#3f6212"],
+    shell: { dx: 0, dy: -72, w: 368, h: 54, density: 0.0018 },
+    parts: [
+      { name: "wheel", shape: "circle", dx: 112, dy: -30, r: 30, kg: 28, thr: 78, gripR: 34, density: 0.002, z: 1, joints: [[112, -52, 0.92], [100, -22, 0.92]] },
+      { name: "wheel", shape: "circle", dx: -112, dy: -30, r: 30, kg: 28, thr: 78, gripR: 34, density: 0.002, z: 1, joints: [[-112, -52, 0.92], [-100, -22, 0.92]] },
+      { name: "engine", dx: 124, dy: -76, w: 78, h: 48, kg: 180, gripR: 46, gripK: 0.7, density: 0.004, engineThr: [150, 85], z: 3, joints: [[88, -80], [158, -80], [124, -58]] },
+      { name: "seat", dx: 24, dy: -124, w: 42, h: 44, kg: 18, thr: 45, gripR: 30, density: 0.0009, z: 3, joints: [[24, -102], [10, -138]] },
+      { name: "seat", dx: -48, dy: -120, w: 56, h: 38, kg: 18, thr: 45, gripR: 34, density: 0.0009, z: 3, joints: [[-48, -102], [-64, -134]] },
+      { name: "door", dx: 40, dy: -136, w: 62, h: 78, kg: 40, thr: 55, gripR: 46, density: 0.0012, color: true, z: 4, joints: [[16, -162, 0.78], [62, -110, 0.78]] },
+      { name: "door", dx: -46, dy: -136, w: 62, h: 78, kg: 40, thr: 55, gripR: 46, density: 0.0012, color: true, z: 4, joints: [[-68, -162, 0.78], [-22, -110, 0.78]] },
+      { name: "hood", dx: 126, dy: -106, w: 124, h: 14, kg: 45, thr: 44, gripR: 56, density: 0.0012, color: true, z: 5, joints: [[78, -102, 0.6], [168, -102, 0.6]] },
+      { name: "trunk", dx: -138, dy: -104, w: 84, h: 13, kg: 35, thr: 44, gripR: 44, density: 0.0012, color: true, z: 5, joints: [[-168, -102, 0.6], [-106, -102, 0.6]] },
+      { name: "roof", dx: -20, dy: -176, w: 124, h: 13, kg: 88, thr: 70, gripR: 60, gripK: 0.8, density: 0.0012, color: true, z: 6, joints: [[34, -168, 0.8], [-72, -168, 0.8]] },
+      { name: "windshield", shape: "slope", dx1: 72, dy1: -98, dx2: 42, dy2: -170, thick: 11, w: 78, h: 11, kg: 15, glass: true, hp: 2, thr: 90, gripR: 40, density: 0.001, z: 5, joints: [[70, -104, 0.85], [57, -137, 0.85], [44, -164, 0.85]] },
+      { name: "rearwindow", shape: "slope", dx1: -104, dy1: -98, dx2: -80, dy2: -168, thick: 11, w: 74, h: 11, kg: 12, glass: true, hp: 2, thr: 90, gripR: 38, density: 0.001, z: 5, joints: [[-102, -104, 0.85], [-92, -136, 0.85], [-82, -162, 0.85]] }
+    ]
+  },
+  pickup: {
+    id: "pickup", label: "PICKUP", crushKg: 800,
+    colors: ["#9c4a1f", "#47624a", "#616d7a"],
+    shell: { dx: 0, dy: -76, w: 384, h: 62, density: 0.002 },
+    parts: [
+      { name: "wheel", shape: "circle", dx: 118, dy: -34, r: 34, kg: 34, thr: 98, gripR: 38, density: 0.0022, z: 1, joints: [[118, -58, 0.92], [104, -24, 0.92]] },
+      { name: "wheel", shape: "circle", dx: -118, dy: -34, r: 34, kg: 34, thr: 98, gripR: 38, density: 0.0022, z: 1, joints: [[-118, -58, 0.92], [-104, -24, 0.92]] },
+      { name: "engine", dx: 132, dy: -80, w: 84, h: 54, kg: 230, gripR: 50, gripK: 0.7, density: 0.004, engineThr: [190, 106], z: 3, joints: [[96, -84], [166, -84], [132, -56]] },
+      { name: "seat", dx: 44, dy: -124, w: 42, h: 46, kg: 20, thr: 56, gripR: 30, density: 0.0009, z: 3, joints: [[44, -102], [30, -148]] },
+      { name: "seat", dx: -14, dy: -122, w: 52, h: 40, kg: 20, thr: 56, gripR: 32, density: 0.0009, z: 3, joints: [[-14, -102], [-28, -146]] },
+      { name: "door", dx: 56, dy: -138, w: 58, h: 80, kg: 46, thr: 69, gripR: 46, density: 0.0012, color: true, z: 4, joints: [[32, -164, 0.78], [76, -112, 0.78]] },
+      { name: "door", dx: -2, dy: -138, w: 54, h: 80, kg: 46, thr: 69, gripR: 44, density: 0.0012, color: true, z: 4, joints: [[-24, -164, 0.78], [20, -112, 0.78]] },
+      { name: "hood", dx: 140, dy: -112, w: 110, h: 14, kg: 52, thr: 55, gripR: 54, density: 0.0012, color: true, z: 5, joints: [[94, -108, 0.6], [180, -108, 0.6]] },
+      { name: "roof", dx: 2, dy: -180, w: 108, h: 13, kg: 80, thr: 88, gripR: 52, gripK: 0.8, density: 0.0012, color: true, z: 6, joints: [[40, -172, 0.8], [-40, -172, 0.8]] },
+      { name: "windshield", shape: "slope", dx1: 98, dy1: -100, dx2: 66, dy2: -172, thick: 12, w: 79, h: 12, kg: 16, glass: true, hp: 2, thr: 112, gripR: 40, density: 0.001, z: 5, joints: [[96, -106, 0.85], [82, -138, 0.85], [68, -166, 0.85]] },
+      { name: "rearwindow", shape: "slope", dx1: -50, dy1: -100, dx2: -44, dy2: -170, thick: 11, w: 70, h: 11, kg: 12, glass: true, hp: 2, thr: 112, gripR: 36, density: 0.001, z: 5, joints: [[-49, -106, 0.85], [-47, -138, 0.85], [-45, -164, 0.85]] },
+      { name: "tailgate", kind: "tailgate", dx: -190, dy: -119, w: 14, h: 52, kg: 55, thr: 95, gripR: 40, density: 0.0016, color: true, z: 4, joints: [[-182, -140, 0.85], [-182, -98, 0.85]] }
+    ]
+  },
+  van: {
+    id: "van", label: "VAN", crushKg: 900,
+    colors: ["#c8c2b4", "#7f9db9", "#a85b4f"],
+    shell: { dx: 0, dy: -92, w: 372, h: 96, density: 0.0019 },
+    parts: [
+      { name: "wheel", shape: "circle", dx: 116, dy: -31, r: 31, kg: 32, thr: 62, gripR: 36, density: 0.002, z: 1, joints: [[116, -54, 0.92], [102, -22, 0.92]] },
+      { name: "wheel", shape: "circle", dx: -116, dy: -31, r: 31, kg: 32, thr: 62, gripR: 36, density: 0.002, z: 1, joints: [[-116, -54, 0.92], [-102, -22, 0.92]] },
+      { name: "engine", dx: 140, dy: -84, w: 66, h: 46, kg: 165, gripR: 44, gripK: 0.7, density: 0.004, engineThr: [140, 80], z: 3, joints: [[112, -88], [166, -88], [140, -64]] },
+      { name: "seat", dx: 104, dy: -120, w: 40, h: 42, kg: 18, thr: 38, gripR: 30, density: 0.0009, z: 3, joints: [[104, -100], [92, -140]] },
+      { name: "seat", dx: 48, dy: -120, w: 40, h: 42, kg: 18, thr: 38, gripR: 30, density: 0.0009, z: 3, joints: [[48, -100], [36, -140]] },
+      { name: "door", dx: 116, dy: -150, w: 54, h: 94, kg: 48, thr: 44, gripR: 46, density: 0.0012, color: true, z: 4, joints: [[92, -182, 0.78], [138, -118, 0.78]] },
+      { name: "door", dx: 58, dy: -150, w: 54, h: 94, kg: 48, thr: 44, gripR: 46, density: 0.0012, color: true, z: 4, joints: [[34, -182, 0.78], [80, -118, 0.78]] },
+      { name: "slidedoor", kind: "slide", dx: -34, dy: -152, w: 84, h: 100, kg: 58, thr: 40, gripR: 60, density: 0.0011, color: true, z: 4, joints: [[-68, -184, 0.7], [0, -184, 0.7], [-68, -120, 0.7], [0, -120, 0.7]] },
+      { name: "reardoor", kind: "reardoor", dx: -179, dy: -116, w: 16, h: 72, kg: 58, thr: 48, gripR: 42, density: 0.0013, color: true, z: 4, joints: [[-170, -140, 0.8], [-170, -92, 0.8]] },
+      { name: "hood", shape: "slope", dx1: 158, dy1: -128, dx2: 182, dy2: -72, thick: 13, w: 61, h: 13, kg: 34, thr: 36, gripR: 40, density: 0.0012, color: true, z: 5, joints: [[168, -118, 0.6], [176, -84, 0.6]] },
+      { name: "roof", dx: -10, dy: -194, w: 300, h: 14, kg: 130, thr: 55, gripR: 90, gripK: 0.8, density: 0.0012, color: true, z: 6, joints: [[120, -186, 0.8], [-140, -186, 0.8]] },
+      { name: "windshield", shape: "slope", dx1: 170, dy1: -116, dx2: 140, dy2: -186, thick: 13, w: 76, h: 13, kg: 22, glass: true, hp: 2, thr: 72, gripR: 44, density: 0.001, z: 5, joints: [[166, -124, 0.85], [155, -152, 0.85], [144, -180, 0.85]] },
+      { name: "rearwindow", dx: -176, dy: -168, w: 13, h: 52, kg: 16, glass: true, hp: 2, thr: 72, gripR: 34, density: 0.001, z: 5, joints: [[-169, -182, 0.85], [-169, -154, 0.85]] }
+    ]
+  },
+  hatch: {
+    id: "hatch", label: "HATCHBACK", crushKg: 520,
+    colors: ["#c94f6d", "#e0a81c", "#5fbf77"],
+    shell: { dx: 0, dy: -69, w: 312, h: 50, density: 0.0016 },
+    parts: [
+      { name: "wheel", shape: "circle", dx: 94, dy: -27, r: 27, kg: 22, thr: 55, gripR: 30, density: 0.002, z: 1, joints: [[94, -48, 0.92], [82, -20, 0.92]] },
+      { name: "wheel", shape: "circle", dx: -94, dy: -27, r: 27, kg: 22, thr: 55, gripR: 30, density: 0.002, z: 1, joints: [[-94, -48, 0.92], [-82, -20, 0.92]] },
+      { name: "engine", dx: 100, dy: -74, w: 62, h: 42, kg: 120, gripR: 40, gripK: 0.7, density: 0.004, engineThr: [110, 62], z: 3, joints: [[74, -78], [126, -78], [100, -56]] },
+      { name: "seat", dx: 20, dy: -118, w: 38, h: 40, kg: 14, thr: 32, gripR: 28, density: 0.0009, z: 3, joints: [[20, -98], [8, -136]] },
+      { name: "seat", dx: -38, dy: -116, w: 48, h: 36, kg: 14, thr: 32, gripR: 30, density: 0.0009, z: 3, joints: [[-38, -98], [-52, -132]] },
+      { name: "door", dx: 34, dy: -130, w: 56, h: 72, kg: 30, thr: 39, gripR: 42, density: 0.0012, color: true, z: 4, joints: [[10, -156, 0.78], [54, -104, 0.78]] },
+      { name: "door", dx: -30, dy: -130, w: 56, h: 72, kg: 30, thr: 39, gripR: 42, density: 0.0012, color: true, z: 4, joints: [[-54, -156, 0.78], [-10, -104, 0.78]] },
+      { name: "hood", dx: 104, dy: -100, w: 96, h: 13, kg: 32, thr: 31, gripR: 48, density: 0.0012, color: true, z: 5, joints: [[64, -96, 0.6], [142, -96, 0.6]] },
+      { name: "roof", dx: -14, dy: -162, w: 110, h: 12, kg: 62, thr: 49, gripR: 54, gripK: 0.8, density: 0.0012, color: true, z: 6, joints: [[34, -156, 0.8], [-60, -156, 0.8]] },
+      { name: "windshield", shape: "slope", dx1: 64, dy1: -90, dx2: 38, dy2: -156, thick: 11, w: 71, h: 11, kg: 13, glass: true, hp: 2, thr: 63, gripR: 36, density: 0.001, z: 5, joints: [[62, -98, 0.85], [51, -124, 0.85], [40, -150, 0.85]] },
+      { name: "hatch", kind: "hatch", shape: "slope", dx1: -76, dy1: -150, dx2: -140, dy2: -64, thick: 14, w: 107, h: 14, kg: 38, thr: 34, gripR: 46, density: 0.0012, color: true, z: 5, joints: [[-84, -140, 0.75], [-104, -108, 0.75], [-124, -80, 0.75]] }
+    ]
+  },
+  bike: {
+    id: "bike", label: "MOTORCYCLE", crushKg: 180, rigMode: "center",
+    colors: ["#b3392f", "#23272e", "#2f6db3"],
+    shell: { dx: 0, dy: -60, w: 176, h: 24, density: 0.0016 },
+    parts: [
+      { name: "wheel", shape: "circle", dx: 80, dy: -26, r: 26, kg: 16, thr: 42, gripR: 30, density: 0.0018, z: 1, joints: [[80, -46, 0.92], [68, -18, 0.92]] },
+      { name: "wheel", shape: "circle", dx: -80, dy: -26, r: 26, kg: 16, thr: 42, gripR: 30, density: 0.0018, z: 1, joints: [[-80, -46, 0.92], [-68, -18, 0.92]] },
+      { name: "engine", dx: 6, dy: -42, w: 44, h: 30, kg: 42, gripR: 32, gripK: 0.7, density: 0.004, engineThr: [55, 55], z: 3, joints: [[-12, -52], [24, -52], [6, -30]] },
+      { name: "exhaust", kind: "exhaust", shape: "slope", dx1: -72, dy1: -44, dx2: 34, dy2: -50, thick: 12, w: 106, h: 12, kg: 10, thr: 30, gripR: 36, density: 0.0015, z: 3, joints: [[-50, -40, 0.7], [10, -42, 0.7]] },
+      { name: "seat", kind: "saddle", dx: -40, dy: -84, w: 62, h: 16, kg: 8, thr: 26, gripR: 32, density: 0.0009, z: 4, joints: [[-58, -76, 0.7], [-22, -76, 0.7]] },
+      { name: "tank", kind: "tank", dx: 18, dy: -88, w: 56, h: 24, kg: 12, thr: 30, gripR: 34, density: 0.0012, color: true, z: 5, joints: [[2, -78, 0.7], [34, -78, 0.7]] },
+      { name: "fork", kind: "fork", shape: "slope", dx1: 82, dy1: -30, dx2: 58, dy2: -108, thick: 12, w: 82, h: 12, kg: 14, thr: 36, gripR: 34, density: 0.0015, z: 5, joints: [[64, -92, 0.8], [72, -64, 0.8]] }
+    ]
+  }
+};
+const VEHICLE_TYPES = ["sedan", "pickup", "van", "hatch", "bike"];
+
+/* ---------- rotation: shuffled bag, never the same type twice ---------- */
+let currentType = "sedan", lastType = "sedan", currentSpec = null;
+let typeBag = [];
+function refillBag() {
+  typeBag = VEHICLE_TYPES.slice();
+  for (let i = typeBag.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = typeBag[i]; typeBag[i] = typeBag[j]; typeBag[j] = t;
+  }
+  if (typeBag[0] === lastType && typeBag.length > 1) {
+    const k = 1 + Math.floor(Math.random() * (typeBag.length - 1));
+    const t = typeBag[0]; typeBag[0] = typeBag[k]; typeBag[k] = t;
+  }
+}
+function peekNextType() { if (!typeBag.length) refillBag(); return typeBag[0]; }
+function drawNextType() { if (!typeBag.length) refillBag(); return typeBag.shift(); }
+
+/* ---------- vehicle factory ---------- */
+let rigGeom = { mode: "stands", stands: [], chocks: [] };
+function buildVehicle(spec, color, driveIn) {
+  const ox = driveIn ? 660 : 0, oy = driveIn ? 30 : 0;
+  const group = Body.nextGroup(true);
+  const base = { friction: 0.6, frictionAir: 0.012, restitution: 0.08, collisionFilter: { group } };
+  const X = dx => CAR_X + dx + ox, Y = dy => GROUND_Y + dy + oy;
+  const ss = spec.shell;
+  const shellBody = Bodies.rectangle(X(ss.dx), Y(ss.dy), ss.w, ss.h, Object.assign({ density: ss.density }, base));
+  const shell = makePart("shell", shellBody, { kg: spec.crushKg, isShell: true, gripR: 120, gripK: 0.3, w: ss.w, h: ss.h, drawZ: 2, color, vtype: spec.id }, { x: CAR_X + ss.dx, y: GROUND_Y + ss.dy });
+  shellPart = shell;
+  Composite.add(world, shellBody);
+  for (const ps of spec.parts) {
+    const opts = Object.assign({ density: ps.density || 0.0012 }, base);
+    let body, home;
+    if (ps.shape === "circle") { body = Bodies.circle(X(ps.dx), Y(ps.dy), ps.r, opts); home = { x: CAR_X + ps.dx, y: GROUND_Y + ps.dy }; }
+    else if (ps.shape === "slope") { body = sloped(X(ps.dx1), Y(ps.dy1), X(ps.dx2), Y(ps.dy2), ps.thick, opts); home = { x: CAR_X + (ps.dx1 + ps.dx2) / 2, y: GROUND_Y + (ps.dy1 + ps.dy2) / 2 }; }
+    else { body = Bodies.rectangle(X(ps.dx), Y(ps.dy), ps.w || 40, ps.h || 30, opts); home = { x: CAR_X + ps.dx, y: GROUND_Y + ps.dy }; }
+    const p = makePart(ps.name, body, {
+      kg: ps.kg, threshold: ps.thr !== undefined ? ps.thr : 55,
+      glass: !!ps.glass, hp: ps.hp || 0,
+      gripR: ps.gripR || 40, gripK: ps.gripK || 0.85,
+      w: ps.w || 0, h: ps.h || 0, r: ps.r || 0,
+      drawZ: ps.z !== undefined ? ps.z : 5,
+      color: ps.color ? color : "#888",
+      kind: ps.kind || null, engineThr: ps.engineThr || null
+    }, home);
+    Composite.add(world, body);
+    for (const j of ps.joints) addJoint(p, shellBody, X(j[0]), Y(j[1]), j[2]);
+  }
+}
+function spawnCar(driveIn, typeId) {
   releaseGrip();
   rigLocked = false; rigTarget = 1;
   parts = parts.filter(p => p.isSlab);
   shellPart = null;
-  const color = CAR_COLORS[carSeq % CAR_COLORS.length]; carSeq++;
-  const cx = CAR_X, gy = GROUND_Y;
-  const ox = driveIn ? 660 : 0, oy = driveIn ? 30 : 0;
-  const group = Body.nextGroup(true);
-  const base = { friction: 0.6, frictionAir: 0.012, restitution: 0.08, collisionFilter: { group } };
-  const B = (maker) => maker;
-  // wheels
-  const wheelF = makePart("wheel", Bodies.circle(cx + 108 + ox, 633 + oy, 31, Object.assign({ density: 0.002 }, base)), { kg: 28, threshold: 78, gripR: 34, r: 31, drawZ: 1 }, { x: cx + 108, y: 633 });
-  const wheelR = makePart("wheel", Bodies.circle(cx - 108 + ox, 633 + oy, 31, Object.assign({ density: 0.002 }, base)), { kg: 28, threshold: 78, gripR: 34, r: 31, drawZ: 1 }, { x: cx - 108, y: 633 });
-  // shell
-  const shell = makePart("shell", Bodies.rectangle(cx + ox, 589 + oy, 356, 58, Object.assign({ density: 0.0018 }, base)), { kg: SHELL_KG, isShell: true, gripR: 120, gripK: 0.3, w: 356, h: 58, drawZ: 2, color }, { x: cx, y: 589 });
-  shellPart = shell;
-  // engine
-  const engineP = makePart("engine", Bodies.rectangle(cx + 116 + ox, 584 + oy, 76, 50, Object.assign({ density: 0.004 }, base)), { kg: 180, gripR: 46, gripK: 0.7, w: 76, h: 50, drawZ: 3 }, { x: cx + 116, y: 584 });
-  // seats
-  const seatF = makePart("seat", Bodies.rectangle(cx + 28 + ox, 536 + oy, 42, 46, Object.assign({ density: 0.0009 }, base)), { kg: 18, threshold: 45, gripR: 30, w: 42, h: 46, drawZ: 3 }, { x: cx + 28, y: 536 });
-  const seatR = makePart("seat", Bodies.rectangle(cx - 44 + ox, 540 + oy, 58, 40, Object.assign({ density: 0.0009 }, base)), { kg: 18, threshold: 45, gripR: 34, w: 58, h: 40, drawZ: 3 }, { x: cx - 44, y: 540 });
-  // doors
-  const doorF = makePart("door", Bodies.rectangle(cx + 44 + ox, 522 + oy, 64, 80, Object.assign({ density: 0.0012 }, base)), { kg: 40, threshold: 55, gripR: 46, w: 64, h: 80, drawZ: 4, color }, { x: cx + 44, y: 522 });
-  const doorR = makePart("door", Bodies.rectangle(cx - 44 + ox, 522 + oy, 64, 80, Object.assign({ density: 0.0012 }, base)), { kg: 40, threshold: 55, gripR: 46, w: 64, h: 80, drawZ: 4, color }, { x: cx - 44, y: 522 });
-  // hood and trunk
-  const hood = makePart("hood", Bodies.rectangle(cx + 116 + ox, 552 + oy, 112, 15, Object.assign({ density: 0.0012 }, base)), { kg: 45, threshold: 44, gripR: 54, w: 112, h: 15, drawZ: 5, color }, { x: cx + 116, y: 552 });
-  const trunk = makePart("trunk", Bodies.rectangle(cx - 122 + ox, 552 + oy, 96, 15, Object.assign({ density: 0.0012 }, base)), { kg: 35, threshold: 44, gripR: 48, w: 96, h: 15, drawZ: 5, color }, { x: cx - 122, y: 552 });
-  // roof
-  const roof = makePart("roof", Bodies.rectangle(cx - 6 + ox, 470 + oy, 158, 14, Object.assign({ density: 0.0012 }, base)), { kg: 90, threshold: 70, gripR: 62, gripK: 0.8, w: 158, h: 14, drawZ: 6, color }, { x: cx - 6, y: 470 });
-  // glass
-  const shield = makePart("windshield", sloped(cx + 86 + ox, 562 + oy, cx + 60 + ox, 478 + oy, 11, Object.assign({ density: 0.001 }, base)), { kg: 15, glass: true, hp: 2, threshold: 90, gripR: 40, w: 88, h: 11, drawZ: 5 }, { x: cx + 73, y: 520 });
-  const rearG = makePart("rearwindow", sloped(cx - 88 + ox, 562 + oy, cx - 78 + ox, 478 + oy, 11, Object.assign({ density: 0.001 }, base)), { kg: 12, glass: true, hp: 2, threshold: 90, gripR: 38, w: 85, h: 11, drawZ: 5 }, { x: cx - 83, y: 520 });
-  for (const p of parts) if (!p.isSlab) Composite.add(world, p.body);
-  const sh = shell.body;
-  addJoint(wheelF, sh, cx + 108 + ox, 610 + oy, 0.92); addJoint(wheelF, sh, cx + 96 + ox, 640 + oy, 0.92);
-  addJoint(wheelR, sh, cx - 108 + ox, 610 + oy, 0.92); addJoint(wheelR, sh, cx - 96 + ox, 640 + oy, 0.92);
-  addJoint(engineP, sh, cx + 84 + ox, 578 + oy); addJoint(engineP, sh, cx + 148 + ox, 578 + oy); addJoint(engineP, sh, cx + 116 + ox, 604 + oy);
-  addJoint(seatF, sh, cx + 28 + ox, 554 + oy); addJoint(seatF, sh, cx + 14 + ox, 522 + oy);
-  addJoint(seatR, sh, cx - 44 + ox, 554 + oy); addJoint(seatR, sh, cx - 60 + ox, 526 + oy);
-  addJoint(doorF, sh, cx + 20 + ox, 496 + oy, 0.78); addJoint(doorF, sh, cx + 66 + ox, 546 + oy, 0.78);
-  addJoint(doorR, sh, cx - 66 + ox, 496 + oy, 0.78); addJoint(doorR, sh, cx - 20 + ox, 546 + oy, 0.78);
-  addJoint(hood, sh, cx + 72 + ox, 556 + oy, 0.6); addJoint(hood, sh, cx + 160 + ox, 556 + oy, 0.6);
-  addJoint(trunk, sh, cx - 152 + ox, 556 + oy, 0.6); addJoint(trunk, sh, cx - 92 + ox, 556 + oy, 0.6);
-  addJoint(roof, sh, cx + 56 + ox, 480 + oy, 0.8); addJoint(roof, sh, cx - 70 + ox, 480 + oy, 0.8);
-  addJoint(shield, sh, cx + 84 + ox, 556 + oy, 0.85); addJoint(shield, sh, cx + 73 + ox, 520 + oy, 0.85); addJoint(shield, sh, cx + 62 + ox, 484 + oy, 0.85);
-  addJoint(rearG, sh, cx - 87 + ox, 556 + oy, 0.85); addJoint(rearG, sh, cx - 83 + ox, 520 + oy, 0.85); addJoint(rearG, sh, cx - 79 + ox, 484 + oy, 0.85);
+  const type = typeId || (driveIn ? drawNextType() : "sedan");
+  const spec = VEHICLES[type];
+  currentType = type; lastType = type; currentSpec = spec;
+  const color = spec.colors[Math.floor(Math.random() * spec.colors.length)];
+  buildVehicle(spec, color, driveIn);
   totalStrippable = parts.filter(p => !p.isShell && !p.isSlab).reduce((s, p) => s + p.kg, 0);
   strippedKg = 0;
   graceUntil = performance.now() + 1400;
+  // the rig adapts to the vehicle: stands and chocks sit off its own
+  // wheel positions, and the motorcycle gets a single center stand
+  const wheels = parts.filter(p => p.name === "wheel" && p.body).sort((a, b) => a.home.x - b.home.x);
+  if (spec.rigMode === "center" || wheels.length < 2) {
+    rigGeom = { mode: "center", stands: [{ baseX: CAR_X, tipDX: 0, dir: 1 }], chocks: wheels.length ? [{ x: wheels[0].home.x - wheels[0].r - 1, dir: -1 }] : [] };
+  } else {
+    const wr = wheels[0], wf = wheels[wheels.length - 1];
+    const wb = wf.home.x - wr.home.x;
+    rigGeom = { mode: "stands",
+      stands: [{ baseX: CAR_X - wb * 0.185, tipDX: -wb * 0.07, dir: -1 }, { baseX: CAR_X + wb * 0.185, tipDX: wb * 0.07, dir: 1 }],
+      chocks: [{ x: wr.home.x - wr.r - 1, dir: -1 }, { x: wf.home.x + wf.r + 1, dir: 1 }] };
+  }
   if (driveIn) {
     for (const p of parts) if (!p.isSlab && p.body) Body.setStatic(p.body, true);
-    carArriving = true; arriveDX = ox; carLive = false;
+    carArriving = true; arriveDX = 660; carLive = false;
   } else {
     carArriving = false; carLive = true;
-    // the dismantling rig takes the car: shell pinned while stripping
-    Body.setStatic(shell.body, true);
+    // the dismantling rig takes the vehicle: shell pinned while stripping
+    Body.setStatic(shellPart.body, true);
     rigLocked = true; rigAnim = 0; rigTarget = 0;
   }
+}
+
+/* ---------- shell painting, one silhouette per vehicle type ---------- */
+function drawShellShape(c, p) {
+  switch (p.vtype) {
+    case "pickup": drawShellPickup(c, p); break;
+    case "van": drawShellVan(c, p); break;
+    case "hatch": drawShellHatch(c, p); break;
+    case "bike": drawShellBike(c, p); break;
+    default: drawShellSedan(c, p);
+  }
+}
+function drawShellSedan(c, p) {
+  const col = p.color;
+  // cabin interior (dark opening)
+  c.fillStyle = "#10131a";
+  c.beginPath();
+  c.moveTo(74, -24); c.lineTo(44, -96); c.lineTo(-78, -96); c.lineTo(-104, -24); c.closePath(); c.fill();
+  // engine bay recess
+  c.fillStyle = "#171b22"; rr(c, 62, -27, 120, 22, 3); c.fill();
+  // sleek body: long sloping hood line, low nose, short rear deck
+  c.fillStyle = col;
+  c.beginPath();
+  c.moveTo(-184, -14);
+  c.lineTo(-108, -25);
+  c.lineTo(72, -27);
+  c.lineTo(148, -23);
+  c.lineTo(184, -7);
+  c.lineTo(184, 27); c.lineTo(148, 27);
+  c.arc(112, 27, 36, 0, Math.PI, true);
+  c.lineTo(-76, 27);
+  c.arc(-112, 27, 36, 0, Math.PI, true);
+  c.closePath(); c.fill(); c.stroke();
+  // pillars and roof rail
+  c.strokeStyle = col; c.lineWidth = 12; c.lineCap = "round";
+  c.beginPath(); c.moveTo(72, -24); c.lineTo(45, -94); c.stroke();
+  c.beginPath(); c.moveTo(-102, -24); c.lineTo(-79, -94); c.stroke();
+  c.lineWidth = 10;
+  c.beginPath(); c.moveTo(46, -96); c.lineTo(-77, -96); c.stroke();
+  c.lineCap = "butt";
+  // shading, character line, lights
+  c.fillStyle = "rgba(255,255,255,0.13)"; rr(c, -182, -25, 330, 8, 4); c.fill();
+  c.strokeStyle = "rgba(255,255,255,0.10)"; c.lineWidth = 2;
+  c.beginPath(); c.moveTo(-168, -4); c.lineTo(160, -8); c.stroke();
+  c.fillStyle = "rgba(0,0,0,0.22)"; rr(c, -184, 15, 368, 12, 4); c.fill();
+  c.fillStyle = "#ffe9a8"; rr(c, 168, -6, 12, 11, 3); c.fill();
+  c.strokeStyle = "rgba(8,10,14,0.6)"; c.lineWidth = 1.5; rr(c, 168, -6, 12, 11, 3); c.stroke();
+  c.fillStyle = "#e5484d"; rr(c, -183, -8, 8, 11, 3); c.fill();
+}
+function drawShellPickup(c, p) {
+  const col = p.color;
+  // cab interior (dark opening)
+  c.fillStyle = "#10131a";
+  c.beginPath();
+  c.moveTo(96, -26); c.lineTo(68, -94); c.lineTo(-45, -94); c.lineTo(-51, -26); c.closePath(); c.fill();
+  // engine bay recess
+  c.fillStyle = "#171b22"; rr(c, 92, -31, 104, 22, 3); c.fill();
+  // main body with wheel arches
+  c.fillStyle = col;
+  c.beginPath();
+  c.moveTo(-192, -29);
+  c.lineTo(192, -29); c.lineTo(192, 31); c.lineTo(158, 31);
+  c.arc(118, 31, 40, 0, Math.PI, true);
+  c.lineTo(-78, 31);
+  c.arc(-118, 31, 40, 0, Math.PI, true);
+  c.closePath(); c.fill(); c.stroke();
+  // open bed: dark cavity, floor line, top rail, cab back wall
+  c.fillStyle = "#14171c"; rr(c, -188, -28, 124, 23, 2); c.fill();
+  c.fillStyle = "rgba(255,255,255,0.07)"; c.fillRect(-188, -8, 124, 3);
+  c.fillStyle = shade(col, 1.18); rr(c, -190, -31, 128, 5, 2); c.fill();
+  c.strokeStyle = "rgba(0,0,0,0.45)"; c.lineWidth = 3;
+  c.beginPath(); c.moveTo(-62, -28); c.lineTo(-62, 2); c.stroke();
+  // pillars and roof rail
+  c.strokeStyle = col; c.lineWidth = 12; c.lineCap = "round";
+  c.beginPath(); c.moveTo(96, -26); c.lineTo(69, -92); c.stroke();
+  c.beginPath(); c.moveTo(-50, -26); c.lineTo(-46, -92); c.stroke();
+  c.lineWidth = 10;
+  c.beginPath(); c.moveTo(67, -95); c.lineTo(-46, -95); c.stroke();
+  c.lineCap = "butt";
+  // shading and lights
+  c.fillStyle = "rgba(255,255,255,0.12)"; rr(c, -60, -29, 252, 9, 4); c.fill();
+  c.fillStyle = "rgba(0,0,0,0.22)"; rr(c, -192, 17, 384, 14, 4); c.fill();
+  c.fillStyle = "#ffe9a8"; rr(c, 178, -12, 12, 13, 3); c.fill();
+  c.strokeStyle = "rgba(8,10,14,0.6)"; c.lineWidth = 1.5; rr(c, 178, -12, 12, 13, 3); c.stroke();
+  c.fillStyle = "#e5484d"; rr(c, -191, 8, 7, 12, 3); c.fill();
+}
+function drawShellVan(c, p) {
+  const col = p.color;
+  // window band interior (dark opening across the top)
+  c.fillStyle = "#10131a";
+  c.beginPath();
+  c.moveTo(168, -22); c.lineTo(142, -92); c.lineTo(-158, -92); c.lineTo(-166, -22); c.closePath(); c.fill();
+  // big box body with a sloped nose
+  c.fillStyle = col;
+  c.beginPath();
+  c.moveTo(-186, -44);
+  c.lineTo(148, -44);
+  c.lineTo(186, -14);
+  c.lineTo(186, 48); c.lineTo(147, 48);
+  c.arc(116, 48, 37, 0, Math.PI, true);
+  c.lineTo(-79, 48);
+  c.arc(-116, 48, 37, 0, Math.PI, true);
+  c.closePath(); c.fill(); c.stroke();
+  // posts and roof rail over the band
+  c.strokeStyle = col; c.lineCap = "round";
+  c.lineWidth = 11;
+  c.beginPath(); c.moveTo(166, -24); c.lineTo(143, -90); c.stroke();
+  c.lineWidth = 9;
+  for (const px of [84, 16, -76]) { c.beginPath(); c.moveTo(px, -24); c.lineTo(px, -90); c.stroke(); }
+  c.lineWidth = 10;
+  c.beginPath(); c.moveTo(-158, -24); c.lineTo(-158, -90); c.stroke();
+  c.beginPath(); c.moveTo(141, -93); c.lineTo(-157, -93); c.stroke();
+  c.lineCap = "butt";
+  // sliding door track and panel seams
+  c.strokeStyle = "rgba(0,0,0,0.4)"; c.lineWidth = 3;
+  c.beginPath(); c.moveTo(-80, -4); c.lineTo(10, -4); c.stroke();
+  c.strokeStyle = "rgba(0,0,0,0.22)"; c.lineWidth = 2;
+  c.beginPath(); c.moveTo(84, -20); c.lineTo(84, 44); c.stroke();
+  c.beginPath(); c.moveTo(-76, -20); c.lineTo(-76, 44); c.stroke();
+  // shading, grille, lights
+  c.fillStyle = "rgba(255,255,255,0.12)"; rr(c, -184, -44, 330, 9, 4); c.fill();
+  c.fillStyle = "rgba(0,0,0,0.22)"; rr(c, -186, 32, 372, 16, 4); c.fill();
+  c.fillStyle = "#22262c"; rr(c, 158, 2, 24, 15, 3); c.fill();
+  c.fillStyle = "#ffe9a8"; rr(c, 170, 20, 12, 14, 3); c.fill();
+  c.strokeStyle = "rgba(8,10,14,0.6)"; c.lineWidth = 1.5; rr(c, 170, 20, 12, 14, 3); c.stroke();
+  c.fillStyle = "#e5484d"; rr(c, -185, 14, 8, 13, 3); c.fill();
+}
+function drawShellHatch(c, p) {
+  const col = p.color;
+  // cabin interior (dark opening)
+  c.fillStyle = "#10131a";
+  c.beginPath();
+  c.moveTo(64, -19); c.lineTo(39, -85); c.lineTo(-71, -85); c.lineTo(-88, -19); c.closePath(); c.fill();
+  // dark recess under the sloped hatch
+  c.strokeStyle = "#10131a"; c.lineWidth = 17; c.lineCap = "round";
+  c.beginPath(); c.moveTo(-78, -78); c.lineTo(-136, 2); c.stroke();
+  c.lineCap = "butt";
+  // engine bay recess
+  c.fillStyle = "#171b22"; rr(c, 56, -25, 102, 20, 3); c.fill();
+  // compact body
+  c.fillStyle = col;
+  c.beginPath();
+  c.moveTo(-156, -10);
+  c.lineTo(-94, -22);
+  c.lineTo(70, -24);
+  c.lineTo(138, -21);
+  c.lineTo(156, -5);
+  c.lineTo(156, 25); c.lineTo(121, 25);
+  c.arc(94, 25, 33, 0, Math.PI, true);
+  c.lineTo(-67, 25);
+  c.arc(-94, 25, 33, 0, Math.PI, true);
+  c.closePath(); c.fill(); c.stroke();
+  // pillars and roof rail
+  c.strokeStyle = col; c.lineWidth = 11; c.lineCap = "round";
+  c.beginPath(); c.moveTo(63, -20); c.lineTo(40, -83); c.stroke();
+  c.beginPath(); c.moveTo(-86, -20); c.lineTo(-73, -81); c.stroke();
+  c.lineWidth = 9;
+  c.beginPath(); c.moveTo(40, -85); c.lineTo(-70, -85); c.stroke();
+  c.lineCap = "butt";
+  // shading and lights
+  c.fillStyle = "rgba(255,255,255,0.13)"; rr(c, -150, -23, 280, 8, 4); c.fill();
+  c.fillStyle = "rgba(0,0,0,0.22)"; rr(c, -156, 13, 312, 12, 4); c.fill();
+  c.fillStyle = "#ffe9a8"; rr(c, 142, -4, 11, 10, 3); c.fill();
+  c.strokeStyle = "rgba(8,10,14,0.6)"; c.lineWidth = 1.5; rr(c, 142, -4, 11, 10, 3); c.stroke();
+  c.fillStyle = "#e5484d"; rr(c, -155, -6, 7, 10, 3); c.fill();
+}
+function drawShellBike(c, p) {
+  const col = p.color;
+  c.lineCap = "round";
+  const tube = (x1, y1, x2, y2, w, fill) => { c.strokeStyle = fill; c.lineWidth = w; c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke(); };
+  // swingarm and rear shock
+  tube(-78, 32, -16, 8, 6, "#26292f");
+  tube(-54, -12, -74, 30, 5, "#9aa2ab");
+  // upper rail under the tank and seat
+  tube(-72, -14, 42, -15, 5, "#33373d");
+  // main spine and down tube
+  tube(-58, 0, 52, -6, 7, "#33373d");
+  tube(52, -6, 72, 18, 7, "#33373d");
+  // engine cradle
+  tube(30, 14, -26, 14, 6, "#26292f");
+  tube(-26, 14, -40, -2, 6, "#26292f");
+  // steering head
+  tube(50, -8, 60, -22, 9, "#26292f");
+  // paint accent along the spine
+  tube(-50, -2, 44, -8, 3, col);
+  c.lineCap = "butt";
+  // tank mount tab
+  c.fillStyle = "#26292f"; rr(c, 6, -17, 22, 5, 2); c.fill();
 }
 
 /* ---------- part drawing (local coords, body at origin) ---------- */
@@ -682,37 +996,8 @@ function drawPartShape(c, p) {
   const col = p.color;
   c.lineWidth = 2.5;
   c.strokeStyle = "rgba(8,10,14,0.85)";
-  switch (p.name) {
-    case "shell": {
-      // cabin interior (dark opening)
-      c.fillStyle = "#10131a";
-      c.beginPath();
-      c.moveTo(88, -26); c.lineTo(62, -110); c.lineTo(-76, -110); c.lineTo(-90, -26); c.closePath(); c.fill();
-      // engine bay recess
-      c.fillStyle = "#171b22"; rr(c, 60, -29, 114, 24, 3); c.fill();
-      // main body with wheel arches
-      c.fillStyle = col;
-      c.beginPath();
-      c.moveTo(-178, -29);
-      c.lineTo(178, -29); c.lineTo(178, 29); c.lineTo(146, 29);
-      c.arc(108, 29, 38, 0, Math.PI, true);
-      c.lineTo(-70, 29);
-      c.arc(-108, 29, 38, 0, Math.PI, true);
-      c.closePath(); c.fill(); c.stroke();
-      // cabin pillars and roof rail
-      c.strokeStyle = col; c.lineWidth = 13; c.lineCap = "round";
-      c.beginPath(); c.moveTo(86, -24); c.lineTo(61, -108); c.stroke();
-      c.beginPath(); c.moveTo(-88, -24); c.lineTo(-77, -108); c.stroke();
-      c.lineWidth = 11;
-      c.beginPath(); c.moveTo(62, -110); c.lineTo(-76, -110); c.stroke();
-      c.lineCap = "butt";
-      // shading and trim
-      c.fillStyle = "rgba(255,255,255,0.13)"; rr(c, -178, -29, 356, 10, 4); c.fill();
-      c.fillStyle = "rgba(0,0,0,0.22)"; rr(c, -178, 16, 356, 13, 4); c.fill();
-      c.fillStyle = "#ffe9a8"; rr(c, 166, -10, 11, 12, 3); c.fill(); c.strokeStyle = "rgba(8,10,14,0.6)"; c.lineWidth = 1.5; c.stroke();
-      c.fillStyle = "#e5484d"; rr(c, -177, -10, 9, 12, 3); c.fill();
-      break;
-    }
+  if (p.isShell) { drawShellShape(c, p); return; }
+  switch (p.kind || p.name) {
     case "hood": case "trunk": {
       c.fillStyle = col; rr(c, -p.w / 2, -p.h / 2, p.w, p.h, 5); c.fill(); c.stroke();
       c.fillStyle = "rgba(255,255,255,0.16)"; rr(c, -p.w / 2 + 5, -p.h / 2 + 2, p.w - 10, 4, 2); c.fill();
@@ -788,6 +1073,85 @@ function drawPartShape(c, p) {
       c.beginPath(); c.moveTo(-p.w / 2 + 4, -6); c.lineTo(p.w / 2 - 4, -6); c.stroke();
       break;
     }
+    case "tailgate": {
+      c.fillStyle = col; rr(c, -p.w / 2, -p.h / 2, p.w, p.h, 3); c.fill(); c.stroke();
+      c.strokeStyle = "rgba(0,0,0,0.32)"; c.lineWidth = 2;
+      for (const yy of [-13, 0, 13]) { c.beginPath(); c.moveTo(-p.w / 2 + 2, yy); c.lineTo(p.w / 2 - 2, yy); c.stroke(); }
+      c.fillStyle = "rgba(255,255,255,0.18)"; rr(c, -p.w / 2 + 2, -p.h / 2 + 3, p.w - 4, 4, 2); c.fill();
+      c.fillStyle = "#e5484d"; rr(c, -p.w / 2 + 2, p.h / 2 - 12, p.w - 4, 6, 2); c.fill();
+      break;
+    }
+    case "slide": {
+      c.fillStyle = col; rr(c, -p.w / 2, -p.h / 2, p.w, p.h, 6); c.fill(); c.stroke();
+      const g = c.createLinearGradient(0, -p.h / 2, 0, -p.h / 2 + 36);
+      g.addColorStop(0, "#8fc0e4"); g.addColorStop(1, "#4d7596");
+      c.fillStyle = g; rr(c, -p.w / 2 + 7, -p.h / 2 + 7, p.w - 14, 32, 4); c.fill();
+      c.strokeStyle = "rgba(10,14,20,0.8)"; c.lineWidth = 2; rr(c, -p.w / 2 + 7, -p.h / 2 + 7, p.w - 14, 32, 4); c.stroke();
+      c.fillStyle = "rgba(255,255,255,0.14)"; rr(c, -p.w / 2 + 5, 6, p.w - 10, 6, 3); c.fill();
+      c.strokeStyle = "rgba(0,0,0,0.35)"; c.lineWidth = 2;
+      c.beginPath(); c.moveTo(p.w / 2 - 8, -p.h / 2 + 6); c.lineTo(p.w / 2 - 8, p.h / 2 - 6); c.stroke();
+      c.fillStyle = "#14181f"; rr(c, p.w / 2 - 20, 16, 12, 5, 2); c.fill();
+      break;
+    }
+    case "reardoor": {
+      c.fillStyle = col; rr(c, -p.w / 2, -p.h / 2, p.w, p.h, 3); c.fill(); c.stroke();
+      c.strokeStyle = "rgba(0,0,0,0.3)"; c.lineWidth = 2;
+      for (const yy of [-18, 0, 18]) { c.beginPath(); c.moveTo(-p.w / 2 + 2, yy); c.lineTo(p.w / 2 - 2, yy); c.stroke(); }
+      c.fillStyle = "#14181f";
+      c.beginPath(); c.arc(0, -p.h / 2 + 8, 2.5, 0, Math.PI * 2); c.fill();
+      c.beginPath(); c.arc(0, p.h / 2 - 8, 2.5, 0, Math.PI * 2); c.fill();
+      c.fillStyle = "#e5484d"; rr(c, -p.w / 2 + 2, -8, p.w - 4, 7, 2); c.fill();
+      break;
+    }
+    case "hatch": {
+      c.fillStyle = col; rr(c, -p.w / 2, -p.h / 2, p.w, p.h, 5); c.fill(); c.stroke();
+      const g = c.createLinearGradient(-p.w / 2, 0, p.w / 2, 0);
+      g.addColorStop(0, "#7fb6d9"); g.addColorStop(0.6, "#cfeafb"); g.addColorStop(1, "#6ea3c6");
+      c.fillStyle = g; rr(c, -p.w / 2 + 9, -p.h / 2 + 2, p.w * 0.55, p.h - 4, 3); c.fill();
+      c.strokeStyle = "rgba(10,14,20,0.85)"; c.lineWidth = 2; rr(c, -p.w / 2 + 9, -p.h / 2 + 2, p.w * 0.55, p.h - 4, 3); c.stroke();
+      c.fillStyle = "rgba(0,0,0,0.25)"; rr(c, p.w / 2 - 14, -p.h / 2 + 1, 10, p.h - 2, 3); c.fill();
+      break;
+    }
+    case "tank": {
+      c.fillStyle = col; rr(c, -p.w / 2, -p.h / 2, p.w, p.h, 11); c.fill(); c.stroke();
+      c.fillStyle = "rgba(255,255,255,0.20)"; rr(c, -p.w / 2 + 6, -p.h / 2 + 3, p.w - 16, 6, 3); c.fill();
+      c.fillStyle = "#22252a"; c.beginPath(); c.arc(10, -3, 4.5, 0, Math.PI * 2); c.fill();
+      c.fillStyle = "rgba(0,0,0,0.18)"; rr(c, -p.w / 2 + 4, p.h / 2 - 7, p.w - 8, 4, 2); c.fill();
+      break;
+    }
+    case "saddle": {
+      c.fillStyle = "#2b2320"; rr(c, -p.w / 2, -p.h / 2, p.w, p.h, 7); c.fill(); c.stroke();
+      c.fillStyle = "#3a2e28"; rr(c, -p.w / 2, -p.h / 2, p.w * 0.4, p.h, 7); c.fill();
+      c.strokeStyle = "rgba(230,210,180,0.35)"; c.lineWidth = 1.5; c.setLineDash([4, 3]);
+      c.beginPath(); c.moveTo(-p.w / 2 + 6, 0); c.lineTo(p.w / 2 - 6, 0); c.stroke(); c.setLineDash([]);
+      break;
+    }
+    case "fork": {
+      c.fillStyle = "#3a3f46"; rr(c, -p.w / 2, -p.h / 2, p.w, p.h, 5); c.fill(); c.stroke();
+      c.fillStyle = "#cfd6dd"; rr(c, -p.w / 2 + 5, -3, p.w * 0.55, 6, 3); c.fill();
+      // handlebar across the top end, with grips and a mirror
+      c.strokeStyle = "#22252a"; c.lineWidth = 6; c.lineCap = "round";
+      c.beginPath(); c.moveTo(p.w / 2 - 8, -17); c.lineTo(p.w / 2 - 8, 17); c.stroke();
+      c.lineCap = "butt";
+      c.fillStyle = "#14181f";
+      c.beginPath(); c.arc(p.w / 2 - 8, -17, 5, 0, Math.PI * 2); c.fill();
+      c.beginPath(); c.arc(p.w / 2 - 8, 17, 5, 0, Math.PI * 2); c.fill();
+      c.strokeStyle = "#22252a"; c.lineWidth = 3;
+      c.beginPath(); c.moveTo(p.w / 2 - 10, -8); c.lineTo(p.w / 2 - 20, -18); c.stroke();
+      c.fillStyle = "#9fc6e8"; c.beginPath(); c.arc(p.w / 2 - 22, -20, 5, 0, Math.PI * 2); c.fill();
+      c.strokeStyle = "rgba(8,10,14,0.7)"; c.lineWidth = 1.5; c.stroke();
+      c.fillStyle = "#22252a"; c.beginPath(); c.arc(-p.w / 2 + 3, 0, 5.5, 0, Math.PI * 2); c.fill();
+      break;
+    }
+    case "exhaust": {
+      const g = c.createLinearGradient(-p.w / 2, 0, p.w / 2, 0);
+      g.addColorStop(0, "#8f979f"); g.addColorStop(0.5, "#d7dde3"); g.addColorStop(1, "#aab2ba");
+      c.fillStyle = g; rr(c, -p.w / 2, -p.h / 2, p.w, p.h, 6); c.fill(); c.stroke();
+      c.fillStyle = "#b9c1c9"; rr(c, -p.w / 2 - 1, -p.h / 2 - 3, p.w * 0.42, p.h + 6, 8); c.fill(); c.stroke();
+      c.fillStyle = "#22252a"; rr(c, -p.w / 2 - 1, -4, 6, 8, 2); c.fill();
+      c.fillStyle = "rgba(200,130,60,0.35)"; rr(c, p.w / 2 - 20, -p.h / 2 + 2, 16, p.h - 4, 4); c.fill();
+      break;
+    }
   }
 }
 </script>
@@ -799,7 +1163,7 @@ function strippedPct() { return Math.max(0, Math.min(100, Math.round(100 * strip
 function huskOnPad() {
   return !!(shellPart && shellPart.body && Math.abs(shellPart.body.position.x - PAD.cx) < 96 && shellPart.body.position.y > 520);
 }
-function plateTargetY() { return shellPart && shellPart.body ? shellPart.body.position.y - 29 - 26 : 262; }
+function plateTargetY() { return shellPart && shellPart.body ? shellPart.body.position.y - shellPart.h / 2 - 26 : 262; }
 function startFlatten(instant) {
   if (flattenAnim || awaitingNext || !carLive || !shellPart || !shellPart.body) return false;
   if (strippedPct() < 80 || !huskOnPad()) return false;
@@ -825,15 +1189,16 @@ function finishFlatten() {
   removePartBody(sh);
   parts = parts.filter(p => p !== sh);
   const idx = slabs.length;
-  const slabBody = Bodies.rectangle(262, GROUND_Y - 11 - idx * 23, 300, 22, { isStatic: true });
+  const slabW = Math.max(120, Math.round(sh.w * 0.84));
+  const slabBody = Bodies.rectangle(262, GROUND_Y - 11 - idx * 23, slabW, 22, { isStatic: true });
   Composite.add(world, slabBody);
-  const slab = { name: "slab", body: slabBody, kg: SHELL_KG, attached: false, joints: [], threshold: 0, glass: false, hp: 0, cracked: false, gripR: 0, gripK: 0, isShell: false, isSlab: true, gone: false, drawZ: 2, w: 300, h: 22, r: 0, color: col, home: { x: 262, y: GROUND_Y - 11 - idx * 23 } };
+  const slab = { name: "slab", body: slabBody, kg: sh.kg, attached: false, joints: [], threshold: 0, glass: false, hp: 0, cracked: false, gripR: 0, gripK: 0, isShell: false, isSlab: true, gone: false, drawZ: 2, w: slabW, h: 22, r: 0, color: col, home: { x: 262, y: GROUND_Y - 11 - idx * 23 } };
   parts.push(slab); slabs.push(slab);
   if (slabs.length > 4) { const old = slabs.shift(); Composite.remove(world, old.body); parts = parts.filter(p => p !== old); }
   shellPart = null;
-  totalScrap += SHELL_KG; store.set("scrap", totalScrap);
+  totalScrap += sh.kg; store.set("scrap", totalScrap);
   carsCrushed++; store.set("cars", carsCrushed);
-  addFloater(PAD.cx, 430, "+" + SHELL_KG + " kg CRUSHED", "#ffb84d");
+  addFloater(PAD.cx, 430, "+" + sh.kg + " kg CRUSHED", "#ffb84d");
   spawnDust(262, GROUND_Y - 24, 9, 100);
   addShake(10);
   flattenAnim = null; shellSquash = 1;
@@ -860,10 +1225,11 @@ function updateHUD() {
   setText(stripEl, String(strippedPct()));
   setText(crushEl, String(carsCrushed));
   let obj;
-  if (carArriving) obj = "Incoming. Fresh metal rolling in.";
+  const vLabel = currentSpec ? currentSpec.label : "SEDAN";
+  if (carArriving) obj = "Incoming " + vLabel + ". Fresh metal rolling in.";
   else if (flattenAnim) obj = "Crushing.";
-  else if (awaitingNext) obj = "Crushed flat. Bring in the next one.";
-  else if (strippedPct() < 80) obj = "Strip it. Tear parts off and feed the bin.";
+  else if (awaitingNext) obj = "Crushed flat. Next up: " + VEHICLES[peekNextType()].label + ". Bring it in.";
+  else if (strippedPct() < 80) obj = "Strip the " + vLabel + ". Tear parts off and feed the bin.";
   else if (!huskOnPad()) obj = "Rig free. Drag the husk onto the flattener pad.";
   else obj = "On the pad. Hit FLATTEN.";
   setText(objEl, obj);
@@ -994,12 +1360,16 @@ function drawRig(c) {
     c.globalAlpha = 1 - rigAnim;
     c.fillStyle = "#575046";
     c.strokeStyle = "rgba(0,0,0,0.55)"; c.lineWidth = 2;
-    c.beginPath(); c.moveTo(CAR_X - 166, GROUND_Y); c.lineTo(CAR_X - 140, GROUND_Y); c.lineTo(CAR_X - 140, GROUND_Y - 24); c.closePath(); c.fill(); c.stroke();
-    c.beginPath(); c.moveTo(CAR_X + 166, GROUND_Y); c.lineTo(CAR_X + 140, GROUND_Y); c.lineTo(CAR_X + 140, GROUND_Y - 24); c.closePath(); c.fill(); c.stroke();
+    for (const ch of rigGeom.chocks) {
+      c.beginPath();
+      c.moveTo(ch.x + ch.dir * 26, GROUND_Y);
+      c.lineTo(ch.x, GROUND_Y);
+      c.lineTo(ch.x, GROUND_Y - 24);
+      c.closePath(); c.fill(); c.stroke();
+    }
     c.restore();
   }
-  drawRigArm(c, CAR_X - 40, -15, -1);
-  drawRigArm(c, CAR_X + 40, 15, 1);
+  for (const s of rigGeom.stands) drawRigArm(c, s.baseX, s.tipDX, s.dir);
 }
 function drawRigTag(c) {
   if (!carLive || carArriving || awaitingNext) return;
@@ -1290,24 +1660,30 @@ window.__SCRAPTEST = {
       partsAttached: parts.filter(p => p.attached && !p.isShell && !p.isSlab).length,
       strippedPct: strippedPct(),
       carsCrushed,
+      vehicle: currentType,
+      nextVehicle: peekNextType(),
+      totalScrap,
+      strippableKg: totalStrippable,
+      crushKg: currentSpec ? currentSpec.crushKg : 0,
       target: { x: targetPos.x, y: targetPos.y },
       clawOpen,
       rigLocked,
       shell: shellPart && shellPart.body ? { x: shellPart.body.position.x, y: shellPart.body.position.y, angle: shellPart.body.angle, isStatic: shellPart.body.isStatic } : null
     };
   },
-  gripTest() {
-    const hood = parts.find(p => p.name === "hood");
-    if (!hood || !hood.body) return false;
-    targetPos = { x: hood.body.position.x, y: hood.body.position.y - 6 };
+  gripPart(name) {
+    const part = parts.find(p => p.name === name);
+    if (!part || !part.body) return false;
+    targetPos = { x: part.body.position.x, y: part.body.position.y - 6 };
     clawPos = { x: targetPos.x, y: targetPos.y };
     solveIK(clawPos.x, clawPos.y);
     clawTarget = 0; clawOpen = 0;
     tryGrip();
     if (!grip) return false;
-    targetPos = clampTarget({ x: hood.body.position.x - 300, y: hood.body.position.y - 330 });
+    targetPos = clampTarget({ x: part.body.position.x - 300, y: part.body.position.y - 330 });
     return true;
   },
+  gripTest() { return this.gripPart("hood"); },
   flattenTest() {
     if (!shellPart || !shellPart.body) return false;
     for (const p of [...parts]) if (!p.isShell && !p.isSlab && p.attached) detachPart(p, false);
@@ -1315,11 +1691,20 @@ window.__SCRAPTEST = {
     Body.setVelocity(shellPart.body, { x: 0, y: 0 });
     Body.setAngle(shellPart.body, 0);
     return startFlatten(true);
+  },
+  spawnType(t) {
+    if (!VEHICLES[t]) return false;
+    for (const p of [...parts]) if (!p.isSlab && p.body) removePartBody(p);
+    parts = parts.filter(p => p.isSlab);
+    shellPart = null;
+    awaitingNext = false; flattenAnim = null; shellSquash = 1; pressPlateY = 262;
+    spawnCar(false, t);
+    return currentType;
   }
 };
 
 /* ---------- boot ---------- */
-spawnCar(false);
+spawnCar(false, "sedan");
 solveIK(clawPos.x, clawPos.y);
 requestAnimationFrame(frame);
 const _q = new URLSearchParams(location.search);
