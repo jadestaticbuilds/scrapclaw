@@ -94,7 +94,7 @@
     <button id="muteBtn" title="Sound on or off">🔊</button>
   </div>
   <div id="objective">Strip it. Tear parts off and feed the bin.</div>
-  <div id="hint">Drag anywhere to swing the claw.<br>Hold CLAW to grip and bite.<br>Pull hard to tear parts free.</div>
+  <div id="hint">Drag anywhere: the claw follows your finger's movement.<br>Hold CLAW to grip and bite.<br>Pull hard to tear parts free.</div>
   <div id="buttons">
     <button class="bigbtn" id="nextBtn">NEXT CAR</button>
     <button class="bigbtn" id="flatBtn">FLATTEN</button>
@@ -332,16 +332,40 @@ function clampTarget(p) {
 }
 
 /* ---------- input ---------- */
-let dragging = false;
+/* Relative (trackpad-style) drag: touching down anchors the claw where
+   it already is and steering is by finger DELTA, so your hand never
+   covers the claw or what it is grabbing. Lift and touch again to
+   re-anchor (clutch), exactly like a trackpad. One steering pointer at
+   a time, tracked by pointerId: the CLAW button is a separate element
+   and a separate pointer, so a thumb holding CLAW can never hijack or
+   cancel the steering finger, and drags that start on a HUD button
+   never reach this canvas handler at all. */
+const DRAG_SENS = 1.0;
+let dragId = null;        // pointerId that owns the steering drag
+let dragStart = null;     // pointer position (world coords) at anchor
+let dragOrigin = null;    // claw target position at anchor
 canvas.addEventListener("pointerdown", e => {
   AudioSys.init();
-  dragging = true;
+  if (dragId !== null) return;
+  dragId = e.pointerId;
+  dragStart = toWorld(e);
+  dragOrigin = { x: targetPos.x, y: targetPos.y };
   try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
-  targetPos = clampTarget(toWorld(e));
 });
-canvas.addEventListener("pointermove", e => { if (dragging) targetPos = clampTarget(toWorld(e)); });
-canvas.addEventListener("pointerup", () => { dragging = false; });
-canvas.addEventListener("pointercancel", () => { dragging = false; });
+canvas.addEventListener("pointermove", e => {
+  if (dragId === null || e.pointerId !== dragId) return;
+  const p = toWorld(e);
+  targetPos = clampTarget({
+    x: dragOrigin.x + (p.x - dragStart.x) * DRAG_SENS,
+    y: dragOrigin.y + (p.y - dragStart.y) * DRAG_SENS
+  });
+});
+function endDrag(e) {
+  if (e.pointerId !== dragId) return;
+  dragId = null; dragStart = null; dragOrigin = null;
+}
+canvas.addEventListener("pointerup", endDrag);
+canvas.addEventListener("pointercancel", endDrag);
 canvas.addEventListener("contextmenu", e => e.preventDefault());
 
 const clawBtn = document.getElementById("clawBtn");
@@ -1156,7 +1180,9 @@ window.__SCRAPTEST = {
     return {
       partsAttached: parts.filter(p => p.attached && !p.isShell && !p.isSlab).length,
       strippedPct: strippedPct(),
-      carsCrushed
+      carsCrushed,
+      target: { x: targetPos.x, y: targetPos.y },
+      clawOpen
     };
   },
   gripTest() {
