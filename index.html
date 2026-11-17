@@ -231,9 +231,9 @@ const AudioSys = {
 const engine = Engine.create();
 engine.gravity.y = 1;
 const world = engine.world;
-const ground = Bodies.rectangle(W / 2, GROUND_Y + 30, W + 500, 60, { isStatic: true, friction: 0.95 });
-const wallL = Bodies.rectangle(-40, H / 2, 60, H * 2, { isStatic: true });
-const wallR = Bodies.rectangle(W + 40, H / 2, 60, H * 2, { isStatic: true });
+const ground = Bodies.rectangle(W / 2, GROUND_Y + 30, W + 900, 60, { isStatic: true, friction: 0.95 });
+const wallL = Bodies.rectangle(-70, H / 2, 100, H * 4, { isStatic: true });
+const wallR = Bodies.rectangle(W + 70, H / 2, 100, H * 4, { isStatic: true });
 Composite.add(world, [ground, wallL, wallR]);
 
 /* ---------- game state ---------- */
@@ -243,6 +243,7 @@ let carLive = false, carArriving = false, arriveDX = 0;
 let carSeq = 0;
 let strippedKg = 0, totalStrippable = 1;
 let grip = null;
+let rigLocked = false, rigAnim = 1, rigTarget = 1; // dismantling rig: anim 0 = arms engaged, 1 = swung away
 let clawOpen = 1, clawTarget = 1, biteArmed = true;
 let clawPos = { x: 580, y: 300 }, targetPos = { x: 580, y: 300 };
 let elbow = { x: 0, y: 0 }, wrist = { x: 0, y: 0 }, clawTip = { x: 0, y: 0 }, clawAng = 0;
@@ -404,6 +405,7 @@ function tryGrip() {
   let best = null, bestScore = Infinity;
   for (const p of parts) {
     if (!p.body || p.glass || p.isSlab) continue;
+    if (p.isShell && rigLocked) continue; // the rig holds the husk; it cannot be gripped or towed until release
     const d = Math.hypot(p.body.position.x - cp.x, p.body.position.y - cp.y);
     if (d >= p.gripR + 34) continue;
     let score = d - p.gripR;
@@ -522,6 +524,54 @@ function binCheck() {
     }
   }
 }
+
+/* ---------- dismantling rig and world bounds ---------- */
+function releaseRig() {
+  if (!rigLocked) return;
+  rigLocked = false;
+  rigTarget = 1;
+  if (shellPart && shellPart.body) {
+    Body.setStatic(shellPart.body, false); // restores the shell's mass and inertia
+    spawnDust(shellPart.body.position.x - 130, GROUND_Y - 6, 4, 70);
+    spawnDust(shellPart.body.position.x + 130, GROUND_Y - 6, 4, 70);
+  }
+  AudioSys.clank(0.9);
+  addFloater(CAR_X, 428, "RIG FREE", "#9fe8a8");
+}
+function rigCheck() {
+  // at 80% stripped the rig lets go: the husk is towable from here on
+  if (rigLocked && carLive && !carArriving && !flattenAnim && !awaitingNext && strippedPct() >= 80) releaseRig();
+}
+function boundsCheck() {
+  // backstop: nothing leaves the yard, ever. The walls and the
+  // full-width ground handle normal play; anything found outside
+  // is recovered here.
+  for (const p of parts) {
+    if (!p.body || p.isSlab) continue;
+    const b = p.body.position;
+    if (b.x > -80 && b.x < 1360 && b.y < 880) continue;
+    if (p.isShell || p.attached) {
+      // shift the whole remaining car back inside, welds intact
+      let dx = 0, dy = 0;
+      if (b.x < 60) dx = 60 - b.x; else if (b.x > 1220) dx = 1220 - b.x;
+      if (b.y > 880) dy = 300 - b.y;
+      for (const q of parts) {
+        if (!q.body || q.isSlab || (!q.attached && !q.isShell)) continue;
+        Body.setPosition(q.body, { x: q.body.position.x + dx, y: q.body.position.y + dy });
+        Body.setVelocity(q.body, { x: 0, y: 0 });
+        Body.setAngularVelocity(q.body, 0);
+      }
+      if (grip) releaseGrip();
+      spawnDust(b.x + dx, Math.min(b.y + dy, GROUND_Y - 8), 6, 80);
+    } else {
+      if (grip && grip.part === p) releaseGrip();
+      Body.setPosition(p.body, { x: CAR_X + (Math.random() * 120 - 60), y: 280 });
+      Body.setVelocity(p.body, { x: 0, y: 0 });
+      Body.setAngularVelocity(p.body, 0);
+      spawnDust(p.body.position.x, p.body.position.y, 6, 60);
+    }
+  }
+}
 </script>
 <script>
 /* ---------- drawing helpers ---------- */
@@ -568,6 +618,7 @@ function sloped(x1, y1, x2, y2, thick, opts) {
 }
 function spawnCar(driveIn) {
   releaseGrip();
+  rigLocked = false; rigTarget = 1;
   parts = parts.filter(p => p.isSlab);
   shellPart = null;
   const color = CAR_COLORS[carSeq % CAR_COLORS.length]; carSeq++;
@@ -620,6 +671,9 @@ function spawnCar(driveIn) {
     carArriving = true; arriveDX = ox; carLive = false;
   } else {
     carArriving = false; carLive = true;
+    // the dismantling rig takes the car: shell pinned while stripping
+    Body.setStatic(shell.body, true);
+    rigLocked = true; rigAnim = 0; rigTarget = 0;
   }
 }
 
@@ -750,6 +804,7 @@ function startFlatten(instant) {
   if (flattenAnim || awaitingNext || !carLive || !shellPart || !shellPart.body) return false;
   if (strippedPct() < 80 || !huskOnPad()) return false;
   releaseGrip();
+  rigLocked = false; rigTarget = 1;
   flattenAnim = { t: 0, crunched: false, instant: !!instant };
   Body.setStatic(shellPart.body, true);
   if (instant) {
@@ -809,7 +864,7 @@ function updateHUD() {
   else if (flattenAnim) obj = "Crushing.";
   else if (awaitingNext) obj = "Crushed flat. Bring in the next one.";
   else if (strippedPct() < 80) obj = "Strip it. Tear parts off and feed the bin.";
-  else if (!huskOnPad()) obj = "Drag the husk onto the flattener pad.";
+  else if (!huskOnPad()) obj = "Rig free. Drag the husk onto the flattener pad.";
   else obj = "On the pad. Hit FLATTEN.";
   setText(objEl, obj);
   flatBtn.classList.toggle("awake", !!(carLive && !flattenAnim && !awaitingNext && strippedPct() >= 80 && huskOnPad()));
@@ -911,6 +966,52 @@ function drawFlattener(c) {
   c.fillStyle = "#4a5462"; rr(c, 952, pressPlateY, 208, 26, 4); c.fill();
   c.strokeStyle = "rgba(0,0,0,0.55)"; c.lineWidth = 2; rr(c, 952, pressPlateY, 208, 26, 4); c.stroke();
   c.fillStyle = "#c9a227"; c.fillRect(952, pressPlateY + 19, 208, 7);
+}
+/* ---------- dismantling rig drawing ---------- */
+function drawRigArm(c, baseX, tipDX, dir) {
+  // one lift stand: the base plate stays planted while the column
+  // rotates around the base as the rig releases, swinging the cradle
+  // down and away from the car (dir -1 = left stand, +1 = right)
+  c.fillStyle = "#22252a"; rr(c, baseX - 27, GROUND_Y - 8, 54, 8, 3); c.fill();
+  c.strokeStyle = "rgba(0,0,0,0.6)"; c.lineWidth = 2; rr(c, baseX - 27, GROUND_Y - 8, 54, 8, 3); c.stroke();
+  c.save();
+  c.translate(baseX, GROUND_Y - 4);
+  c.rotate(dir * 1.08 * rigAnim);
+  // brace strut behind the column, A-frame style
+  tapered(c, -10 * dir, 0, tipDX + 4 * dir, -40, 4.5, 3, "#8a5a14");
+  // main column up to the cradle
+  tapered(c, 0, 0, tipDX, -43, 12, 8.5, "#e8930c");
+  // cradle pad that sits under the rocker panel
+  c.fillStyle = "#2c3036"; rr(c, tipDX - 16, -50, 32, 8, 3); c.fill();
+  c.strokeStyle = "rgba(0,0,0,0.65)"; c.lineWidth = 2; rr(c, tipDX - 16, -50, 32, 8, 3); c.stroke();
+  c.restore();
+}
+function drawRig(c) {
+  if ((!carLive && !carArriving) || awaitingNext) return;
+  // wheel chocks, kicked away as the rig releases
+  if (rigAnim < 0.98) {
+    c.save();
+    c.globalAlpha = 1 - rigAnim;
+    c.fillStyle = "#575046";
+    c.strokeStyle = "rgba(0,0,0,0.55)"; c.lineWidth = 2;
+    c.beginPath(); c.moveTo(CAR_X - 166, GROUND_Y); c.lineTo(CAR_X - 140, GROUND_Y); c.lineTo(CAR_X - 140, GROUND_Y - 24); c.closePath(); c.fill(); c.stroke();
+    c.beginPath(); c.moveTo(CAR_X + 166, GROUND_Y); c.lineTo(CAR_X + 140, GROUND_Y); c.lineTo(CAR_X + 140, GROUND_Y - 24); c.closePath(); c.fill(); c.stroke();
+    c.restore();
+  }
+  drawRigArm(c, CAR_X - 40, -15, -1);
+  drawRigArm(c, CAR_X + 40, 15, 1);
+}
+function drawRigTag(c) {
+  if (!carLive || carArriving || awaitingNext) return;
+  const x = CAR_X - 218, y = 600;
+  c.strokeStyle = "#14181f"; c.lineWidth = 5;
+  c.beginPath(); c.moveTo(x, GROUND_Y); c.lineTo(x, y + 10); c.stroke();
+  c.fillStyle = rigLocked ? "#ffb84d" : "#2e4a3a";
+  rr(c, x - 49, y - 12, 98, 24, 5); c.fill();
+  c.strokeStyle = "rgba(0,0,0,0.7)"; c.lineWidth = 2; rr(c, x - 49, y - 12, 98, 24, 5); c.stroke();
+  c.fillStyle = rigLocked ? "#1a1d22" : "#9fe8a8";
+  c.font = "800 12px system-ui, sans-serif"; c.textAlign = "center";
+  c.fillText(rigLocked ? "RIG LOCKED" : "RIG FREE", x, y + 4);
 }
 function drawExcavator(c) {
   // shadow
@@ -1071,7 +1172,9 @@ function draw() {
   drawBinBack(ctx);
   drawFlattener(ctx);
   drawExcavator(ctx);
+  drawRig(ctx);
   drawParts(ctx);
+  drawRigTag(ctx);
   drawBinFront(ctx);
   drawArm(ctx);
   drawParticles(ctx);
@@ -1129,7 +1232,10 @@ function frame(now) {
       Body.setVelocity(p.body, { x: 0, y: 0 });
     }
     if (arriveDX <= 0) {
-      for (const p of parts) if (!p.isSlab && p.body) Body.setStatic(p.body, false);
+      for (const p of parts) if (!p.isSlab && p.body && !p.isShell) Body.setStatic(p.body, false);
+      // the shell stays static: the dismantling rig takes the car here
+      rigLocked = true; rigTarget = 0;
+      AudioSys.clank(0.5);
       carArriving = false; carLive = true;
       graceUntil = performance.now() + 1000;
       spawnDust(CAR_X - 150, GROUND_Y - 4, 7, 200);
@@ -1148,6 +1254,8 @@ function frame(now) {
   }
   strainCheck();
   binCheck();
+  rigCheck();
+  boundsCheck();
   // flattener animation
   if (flattenAnim && !flattenAnim.instant) {
     flattenAnim.t += dt / 1.5;
@@ -1167,6 +1275,7 @@ function frame(now) {
     pressPlateY += (262 - pressPlateY) * Math.min(1, dt * 2.6);
   }
   stepParticles(dt);
+  rigAnim += Math.max(-dt / 0.4, Math.min(dt / 0.4, rigTarget - rigAnim));
   shake *= Math.exp(-5.2 * dt);
   if (shake < 0.04) shake = 0;
   draw();
@@ -1182,7 +1291,9 @@ window.__SCRAPTEST = {
       strippedPct: strippedPct(),
       carsCrushed,
       target: { x: targetPos.x, y: targetPos.y },
-      clawOpen
+      clawOpen,
+      rigLocked,
+      shell: shellPart && shellPart.body ? { x: shellPart.body.position.x, y: shellPart.body.position.y, angle: shellPart.body.angle, isStatic: shellPart.body.isStatic } : null
     };
   },
   gripTest() {
